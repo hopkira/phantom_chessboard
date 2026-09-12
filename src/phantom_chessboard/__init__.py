@@ -1,3 +1,5 @@
+"""Public API for the standalone Phantom Chessboard package."""
+
 from .board import PhantomBoard
 from .protocol import (
     STARTING_FEN,

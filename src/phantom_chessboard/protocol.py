@@ -1,4 +1,27 @@
-"""Pure protocol encoding/decoding for the Phantom Chessboard."""
+"""Phantom Chessboard production BLE protocol definitions.
+
+This module contains the pure wire-protocol layer used by the standalone
+``phantom_chessboard`` package. It performs no Bluetooth or ROS I/O: functions
+only encode commands, decode notifications, validate values, and convert chess
+positions into Phantom's physical-board representation.
+
+The protocol was reverse engineered from ATT traces captured from a production
+Phantom board and the official mobile application on 12 September 2026. Code
+comments and docstrings deliberately distinguish directly observed behaviour
+from inferred behaviour so future maintainers can tell which assumptions still
+need confirmation.
+
+The production integration currently relies on three custom characteristics:
+``MODE_UUID`` for top-level mode, ``STATUS_UUID`` for human-readable board
+status/correction messages, and ``COMMAND_UUID`` for bidirectional binary/ASCII
+commands and events. The first byte on the command/event characteristic is an
+opcode; common payloads are ASCII.
+
+Phantom's new-game position format is not FEN. It is a 10x10 file-major matrix
+with a one-cell empty border. Interior rows represent files a..h and columns
+represent ranks 8..1. ``fen_to_phantom_matrix`` owns that conversion so no
+other layer needs to know the physical encoding.
+"""
 
 from __future__ import annotations
 
@@ -21,11 +44,35 @@ STARTING_FEN = (
 
 
 class Side(str, Enum):
+    """Human player's colour in Phantom protocol terms.
+    
+    Phantom represents White and Black with the ASCII digits ``1`` and ``2``
+    in side-selection messages. This enum gives higher layers readable names
+    while keeping normalisation in one place.
+    """
     WHITE = "white"
     BLACK = "black"
 
     @classmethod
     def parse(cls, value: "Side | str") -> "Side":
+        """Normalise a side designator to :class:`Side`.
+        
+        Parameters
+        ----------
+        value:
+            ``Side`` instance, colour name, FEN-style letter, or Phantom numeric
+            side token.
+        
+        Returns
+        -------
+        Side
+            Normalised side value.
+        
+        Raises
+        ------
+        ValueError
+            If the value cannot be interpreted as White or Black.
+        """
         if isinstance(value, cls):
             return value
 
@@ -43,6 +90,12 @@ class Side(str, Enum):
 
 
 class BoardState(str, Enum):
+    """High-level board states derived from status notifications.
+    
+    These values are an application-facing abstraction over the exact text
+    emitted by the firmware. Unknown strings remain observable as
+    ``BoardState.UNKNOWN`` rather than being discarded.
+    """
     UNKNOWN = "UNKNOWN"
     HOME = "HOME"
     IDLE = "IDLE"
@@ -59,17 +112,34 @@ class BoardState(str, Enum):
 
 @dataclass(frozen=True)
 class PhantomEvent:
+    """Base type for every decoded Phantom notification.
+    
+    ``raw`` always preserves the exact bytes received from the board. Retaining
+    the raw payload is important while the reverse-engineered protocol is still
+    evolving and allows unknown events to be diagnosed later.
+    """
     raw: bytes
 
 
 @dataclass(frozen=True)
 class StatusEvent(PhantomEvent):
+    """Human-readable status notification from ``STATUS_UUID``.
+    
+    ``text`` is the exact ASCII status and ``state`` is the recognised
+    high-level interpretation when one exists.
+    """
     text: str
     state: BoardState = BoardState.UNKNOWN
 
 
 @dataclass(frozen=True)
 class MoveEvent(PhantomEvent):
+    """Physical chess move reported by the board.
+    
+    ``notation`` preserves Phantom's ``-`` normal-move and ``x`` capture
+    separator. Source/destination fields are split out for consumers that do
+    not want to parse the string.
+    """
     notation: str
     from_square: str
     to_square: str
@@ -77,6 +147,11 @@ class MoveEvent(PhantomEvent):
 
     @property
     def uci(self) -> str:
+        """Return coordinate-only UCI notation for chess logic.
+        
+        Promotion suffixes are not yet handled because a promotion trace has not
+        been captured; the driver must not guess promotion semantics.
+        """
         return (
             self.from_square
             + self.to_square
@@ -85,12 +160,18 @@ class MoveEvent(PhantomEvent):
 
 @dataclass(frozen=True)
 class CorrectionEvent(PhantomEvent):
+    """Physical-position correction requested by Phantom.
+    
+    Example: ``R b6-a1`` means a white rook is physically detected at ``b6``
+    while Phantom expects that rook at ``a1``.
+    """
     piece: str
     actual_square: str
     required_square: str
 
     @property
     def instruction(self) -> str:
+        """Return the compact correction string used by Phantom status output."""
         return (
             f"{self.piece} "
             f"{self.actual_square}-"
@@ -100,16 +181,23 @@ class CorrectionEvent(PhantomEvent):
 
 @dataclass(frozen=True)
 class CleanEvent(PhantomEvent):
+    """Notification that sensed and expected physical positions match."""
     text: str
 
 
 @dataclass(frozen=True)
 class AckEvent(PhantomEvent):
+    """Short binary acknowledgement emitted on the command/event channel."""
     code: int
 
 
 @dataclass(frozen=True)
 class ProtocolEvent(PhantomEvent):
+    """Fallback event for an unknown or not-yet-decoded protocol message.
+    
+    Unknown messages are deliberately surfaced instead of ignored so protocol
+    changes can be captured without modifying the BLE transport first.
+    """
     opcode: int
     payload: bytes
 
@@ -153,6 +241,18 @@ _MOTOR_RE = re.compile(
 def _expand_fen_board(
     fen: str,
 ) -> dict[tuple[int, int], str]:
+    """Expand the piece-placement field of FEN into square contents.
+    
+    The dictionary key is ``(file_index, rank)`` where file index zero means
+    file ``a`` and rank uses normal chess numbering 1..8. Non-placement FEN
+    fields are intentionally ignored because the physical matrix only describes
+    piece locations.
+    
+    Raises
+    ------
+    ValueError
+        If the piece-placement field is malformed.
+    """
     placement = fen.strip().split()[0]
     ranks = placement.split("/")
 
@@ -214,7 +314,23 @@ def _expand_fen_board(
 def fen_to_phantom_matrix(
     fen: str,
 ) -> str:
-    """Convert FEN to Phantom's 100-char bordered file-major matrix."""
+    """Convert FEN into Phantom's 100-character physical position matrix.
+    
+    The matrix is a flattened 10x10 grid. The outer ring is ``.``. Interior
+    rows correspond to files ``a`` through ``h`` and interior columns to ranks
+    ``8`` through ``1``. Upper-case pieces are White and lower-case pieces are
+    Black, matching FEN conventions.
+    
+    Returns
+    -------
+    str
+        Exactly 100 matrix characters.
+    
+    Raises
+    ------
+    ValueError
+        If the FEN piece-placement field is invalid.
+    """
     board = _expand_fen_board(fen)
 
     rows = [".........."]
@@ -256,6 +372,12 @@ def encode_new_game_position(
     fen: str,
     human_side: Side | str,
 ) -> bytes:
+    """Encode the observed opcode-0 new-game setup packet.
+    
+    Wire format is ``0x00 + 100-byte matrix + b",W"`` for a White human or
+    ``b",B"`` for a Black human. The packet was observed immediately after the
+    official app switched the board into play mode.
+    """
     side = Side.parse(human_side)
 
     side_byte = (
@@ -279,6 +401,17 @@ def normalise_move_notation(
     *,
     capture: Optional[bool] = None,
 ) -> str:
+    """Normalise a move to Phantom coordinate notation.
+    
+    Accepted forms are ``e2-e4``, ``f6xe4`` and compact ``e2e4``. When compact
+    notation is supplied, ``capture=True`` selects ``x``; otherwise ``-`` is
+    used.
+    
+    Raises
+    ------
+    ValueError
+        If the move is not in a supported coordinate form.
+    """
     value = move.strip().lower()
     match = _MOTOR_RE.fullmatch(
         value
@@ -330,6 +463,11 @@ def normalise_move_notation(
 def encode_motor_move(
     notation: str,
 ) -> bytes:
+    """Encode a board-controlled physical move using opcode ``0x02``.
+    
+    Observed examples include ``0x02 + b"M d7-d5 E"`` for a normal move and
+    ``0x02 + b"M b4xd2 E"`` for a capture.
+    """
     normal = normalise_move_notation(
         notation
     )
@@ -343,12 +481,22 @@ def encode_motor_move(
 
 def encode_acknowledge_human_move(
 ) -> bytes:
+    """Encode the ``03 31`` acknowledgement sent after an accepted human move.
+    
+    The ROS/chess layer should send this only after it has validated and applied
+    the physical move to its authoritative game state.
+    """
     return b"\x031"
 
 
 def encode_side(
     side: Side | str,
 ) -> bytes:
+    """Encode human-side selection.
+    
+    Directly observed values are ``0A 31`` for human White and ``0A 32`` for
+    human Black.
+    """
     parsed = Side.parse(side)
 
     return (
@@ -361,7 +509,12 @@ def encode_side(
 def encode_capture_preamble(
     side: Side | str,
 ) -> bytes:
-    """Observed 09 31 with human White; Black 09 32 is inferred."""
+    """Encode the preamble observed before a computer-controlled capture.
+    
+    ``09 31`` is directly observed when the human player is White. ``09 32``
+    for human Black is inferred from Phantom's otherwise consistent 1/2 side
+    encoding and remains provisional until captured directly.
+    """
     parsed = Side.parse(side)
 
     return (
@@ -372,16 +525,28 @@ def encode_capture_preamble(
 
 
 def encode_recalibrate() -> bytes:
+    """Encode the directly observed single-byte recalibration command ``0x07``."""
     return b"\x07"
 
 
 def encode_snap_to_center() -> bytes:
+    """Encode the directly observed snap-to-centre command ``0x0D``."""
     return b"\x0d"
 
 
 def encode_reset_detection(
     fen: str,
 ) -> bytes:
+    """Encode reset-detection as ``0x0E`` followed by ASCII FEN.
+    
+    This command instructs Phantom to reconcile its sensed physical position
+    with an authoritative logical position.
+    
+    Raises
+    ------
+    ValueError
+        If the supplied FEN string is empty.
+    """
     value = fen.strip()
 
     if not value:
@@ -396,16 +561,24 @@ def encode_reset_detection(
 
 
 def encode_mode_play() -> bytes:
+    """Return the observed mode-characteristic value for play mode: ASCII ``2``."""
     return b"2"
 
 
 def encode_mode_home() -> bytes:
+    """Return the observed mode-characteristic value for HOME mode: ASCII ``3``."""
     return b"3"
 
 
 def decode_status_notification(
     data: bytes,
 ) -> PhantomEvent:
+    """Decode a notification received from ``STATUS_UUID``.
+    
+    Correction strings such as ``R b6-a1`` become ``CorrectionEvent`` objects;
+    normal text becomes ``StatusEvent``. Non-ASCII payloads are preserved in a
+    ``ProtocolEvent`` rather than discarded.
+    """
     raw = bytes(data)
 
     try:
@@ -446,6 +619,13 @@ def decode_status_notification(
 def decode_command_notification(
     data: bytes,
 ) -> PhantomEvent:
+    """Decode a notification received from ``COMMAND_UUID``.
+    
+    Recognised incoming forms currently include human move events
+    ``03 + b"M 1 ..."``, acknowledgements beginning ``06``, and clean-position
+    reports beginning ``08``. Any unrecognised opcode is returned as a
+    ``ProtocolEvent`` with its bytes intact.
+    """
     raw = bytes(data)
 
     if not raw:

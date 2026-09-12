@@ -1,4 +1,22 @@
-"""Reusable async BLE client for the Phantom Chessboard."""
+"""Asynchronous, ROS-independent driver for the Phantom Chessboard.
+
+``PhantomBoard`` owns BLE discovery, connection lifecycle, GATT notification
+subscriptions, protocol command writes, event delivery, and waiting for
+asynchronous mechanical state transitions. It intentionally does not implement
+chess rules: legality, game state, Stockfish/Lichess, promotions, and strategy
+belong to a higher-level consumer such as K9's ``chess_manager``.
+
+Concurrency model
+-----------------
+The class is intended to live in one asyncio event loop. Bleak callbacks decode
+notifications and update lightweight state immediately; decoded events are then
+placed on an ``asyncio.Queue`` for ordinary application code. Long operations
+wait on board-originated status/ack events rather than arbitrary fixed sleeps.
+
+The iPhone/official application should be disconnected before this driver tries
+to connect. In observed use the Phantom board behaves as a single-central BLE
+peripheral.
+"""
 
 from __future__ import annotations
 
@@ -51,7 +69,19 @@ EventHandler = Callable[
 
 
 class PhantomBoard:
-    """High-level async interface to one Phantom Chessboard."""
+    """High-level asynchronous interface to one Phantom Chessboard.
+    
+    Parameters
+    ----------
+    address:
+        Optional BLE address. If omitted, discover by the advertised Phantom
+        service UUID; service discovery is preferred because BLE addresses may
+        not be stable on every host.
+    scan_timeout:
+        Maximum discovery/connect timeout in seconds.
+    logger:
+        Optional logger; a module logger is used when omitted.
+    """
 
     def __init__(
         self,
@@ -62,6 +92,12 @@ class PhantomBoard:
             logging.Logger
         ] = None,
     ) -> None:
+        """Initialise driver state without opening a BLE connection.
+        
+        Notification/event synchronisation uses monotonically increasing version
+        counters so a stale status that happened before an operation cannot satisfy
+        a wait for a new transition.
+        """
         self.address = address
         self.scan_timeout = (
             scan_timeout
@@ -116,6 +152,7 @@ class PhantomBoard:
 
     @property
     def connected(self) -> bool:
+        """Return ``True`` while the underlying Bleak client reports a live connection."""
         return bool(
             self._client is not None
             and self._client.is_connected
@@ -123,22 +160,30 @@ class PhantomBoard:
 
     @property
     def state(self) -> BoardState:
+        """Return the most recent recognised high-level ``BoardState``."""
         return self._state
 
     @property
     def last_status(self) -> str:
+        """Return the most recent raw status text emitted by Phantom."""
         return self._last_status
 
     @property
     def human_side(
         self,
     ) -> Optional[Side]:
+        """Return the human side currently known to the driver, if one has been selected."""
         return self._human_side
 
     def add_event_handler(
         self,
         handler: EventHandler,
     ) -> None:
+        """Register a synchronous observer for every decoded event.
+        
+        Handlers execute in the driver's asyncio/Bleak context and should return
+        quickly. Blocking or long-running consumers should use ``events()``.
+        """
         self._handlers.append(
             handler
         )
@@ -147,6 +192,7 @@ class PhantomBoard:
         self,
         handler: EventHandler,
     ) -> None:
+        """Remove a previously registered event observer if present."""
         try:
             self._handlers.remove(
                 handler
@@ -157,6 +203,7 @@ class PhantomBoard:
     async def __aenter__(
         self,
     ) -> "PhantomBoard":
+        """Connect the board and return this instance for ``async with`` usage."""
         await self.connect()
         return self
 
@@ -166,11 +213,22 @@ class PhantomBoard:
         exc,
         tb,
     ) -> None:
+        """Disconnect the board when leaving an ``async with`` block."""
         await self.disconnect()
 
     async def _find_device(
         self,
     ) -> BLEDevice:
+        """Discover the target Phantom BLE peripheral.
+        
+        An explicit address is used when configured; otherwise discovery matches
+        the production service UUID advertised by the board.
+        
+        Raises
+        ------
+        RuntimeError
+            If no matching board appears before ``scan_timeout``.
+        """
         if self.address:
             device = (
                 await BleakScanner
@@ -224,6 +282,12 @@ class PhantomBoard:
     async def connect(
         self,
     ) -> None:
+        """Connect and subscribe to status and command/event notifications.
+        
+        Calling this method when already connected is harmless. If notification
+        subscription fails after connection, the partial connection is closed
+        before the exception is re-raised.
+        """
         if self.connected:
             return
 
@@ -270,6 +334,11 @@ class PhantomBoard:
     async def disconnect(
         self,
     ) -> None:
+        """Stop notifications and close the BLE connection.
+        
+        Teardown is intentionally tolerant of partially disconnected BlueZ/Bleak
+        state so this method is safe during exception handling and shutdown.
+        """
         client = self._client
         self._client = None
 
@@ -303,6 +372,7 @@ class PhantomBoard:
     async def next_event(
         self,
     ) -> PhantomEvent:
+        """Wait for and return the next decoded Phantom event."""
         return await self._events.get()
 
     async def events(
@@ -310,6 +380,7 @@ class PhantomBoard:
     ) -> AsyncIterator[
         PhantomEvent
     ]:
+        """Yield decoded Phantom events indefinitely until the consumer task is cancelled."""
         while True:
             yield (
                 await self.next_event()
@@ -319,6 +390,7 @@ class PhantomBoard:
         self,
         event: PhantomEvent,
     ) -> None:
+        """Queue one decoded event and notify lightweight synchronous observers."""
         self._events.put_nowait(
             event
         )
@@ -339,6 +411,11 @@ class PhantomBoard:
         _sender,
         data: bytearray,
     ) -> None:
+        """Handle one ``STATUS_UUID`` notification.
+        
+        Recognised state messages update ``last_status``/``state`` and advance the
+        status-version counter used by asynchronous operation waits.
+        """
         event = (
             decode_status_notification(
                 bytes(data)
@@ -379,6 +456,7 @@ class PhantomBoard:
         _sender,
         data: bytearray,
     ) -> None:
+        """Handle one ``COMMAND_UUID`` notification and update acknowledgement/clean signals."""
         event = (
             decode_command_notification(
                 bytes(data)
@@ -407,6 +485,7 @@ class PhantomBoard:
     def _require_client(
         self,
     ) -> BleakClient:
+        """Return the connected Bleak client or raise a clear lifecycle error."""
         if (
             not self.connected
             or self._client is None
@@ -422,6 +501,7 @@ class PhantomBoard:
         self,
         payload: bytes,
     ) -> None:
+        """Write one already-encoded payload to the bidirectional command characteristic."""
         client = (
             self._require_client()
         )
@@ -441,6 +521,7 @@ class PhantomBoard:
         self,
         payload: bytes,
     ) -> None:
+        """Write a top-level operating-mode value to the dedicated mode characteristic."""
         client = (
             self._require_client()
         )
@@ -458,6 +539,16 @@ class PhantomBoard:
         accepted: set[str],
         timeout: float,
     ) -> str:
+        """Wait for a *new* accepted status after ``after_version``.
+        
+        Version gating prevents a pre-existing ``Board Playing`` value from
+        completing a newly issued command prematurely.
+        
+        Raises
+        ------
+        TimeoutError
+            If no accepted status is observed before the timeout.
+        """
         loop = (
             asyncio.get_running_loop()
         )
@@ -504,6 +595,13 @@ class PhantomBoard:
         code: int,
         timeout: float,
     ) -> None:
+        """Wait for a *new* acknowledgement code after ``after_version``.
+        
+        Raises
+        ------
+        TimeoutError
+            If the requested acknowledgement does not arrive in time.
+        """
         loop = (
             asyncio.get_running_loop()
         )
@@ -542,6 +640,7 @@ class PhantomBoard:
     async def set_play_mode(
         self,
     ) -> None:
+        """Switch the dedicated mode characteristic to the observed play value ``2``."""
         await self._write_mode(
             encode_mode_play()
         )
@@ -551,6 +650,7 @@ class PhantomBoard:
         *,
         timeout: float = 30.0,
     ) -> None:
+        """Return Phantom to HOME mode and wait for a new ``HOME`` status notification."""
         version = (
             self._status_version
         )
@@ -575,6 +675,11 @@ class PhantomBoard:
         timeout: float = 5.0,
         retries: int = 1,
     ) -> None:
+        """Tell Phantom which colour is controlled by the human player.
+        
+        By default the method waits for the observed ``06 04`` acknowledgement and
+        retries once. The selected side is retained for reset/capture operations.
+        """
         parsed = Side.parse(side)
         self._human_side = parsed
 
@@ -621,6 +726,13 @@ class PhantomBoard:
         human_side: Side | str,
         setup_timeout: float = 300.0,
     ) -> None:
+        """Initialise and reconcile a physical game position.
+        
+        Sequence: enter play mode, send opcode-0 position matrix, allow Phantom's
+        own mismatch-management process to reconcile pieces, wait for ``Waiting
+        Side``, select the human side, then wait for ``Board Playing``. Correction
+        events remain available concurrently through ``events()``.
+        """
         parsed = Side.parse(
             human_side
         )
@@ -671,6 +783,11 @@ class PhantomBoard:
     async def acknowledge_human_move(
         self,
     ) -> None:
+        """Acknowledge a human move that the chess layer has accepted.
+        
+        The driver deliberately does not acknowledge ``MoveEvent`` automatically;
+        ``chess_manager`` remains authoritative for legality and game state.
+        """
         await self._write_command(
             encode_acknowledge_human_move()
         )
@@ -683,6 +800,20 @@ class PhantomBoard:
         timeout: float = 120.0,
         send_capture_preamble: bool = True,
     ) -> None:
+        """Command a computer/K9-controlled physical board move.
+        
+        Normal moves use ``-`` and captures use ``x``. Captures optionally send the
+        observed opcode-09 preamble first. The method can wait for a subsequent
+        playing status so mechanical execution remains asynchronous and event
+        driven.
+        
+        Raises
+        ------
+        RuntimeError
+            If a capture preamble is requested before the human side is known.
+        TimeoutError
+            If completion is requested but no playing status arrives.
+        """
         is_capture = (
             "x"
             in notation.lower()
@@ -734,6 +865,12 @@ class PhantomBoard:
         *,
         timeout: float = 180.0,
     ) -> None:
+        """Ask Phantom to centre pieces and wait until play resumes.
+        
+        The captured operation can take around 100 seconds, so the timeout is
+        intentionally generous and completion is status-driven rather than a fixed
+        sleep.
+        """
         version = (
             self._status_version
         )
@@ -758,6 +895,7 @@ class PhantomBoard:
         *,
         timeout: float = 90.0,
     ) -> None:
+        """Run the observed recalibration/homing operation and wait until play resumes."""
         version = (
             self._status_version
         )
@@ -786,6 +924,17 @@ class PhantomBoard:
         ) = None,
         timeout: float = 300.0,
     ) -> None:
+        """Re-synchronise physical detection from an authoritative FEN.
+        
+        This is intended for reconnect/recovery. Phantom receives opcode ``0x0E``
+        plus FEN, reconciles the physical position, asks for the player side again,
+        and then returns to playing.
+        
+        Raises
+        ------
+        RuntimeError
+            If no side is supplied and the driver has no remembered human side.
+        """
         side = (
             Side.parse(human_side)
             if human_side

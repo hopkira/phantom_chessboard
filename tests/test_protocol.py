@@ -1,3 +1,10 @@
+"""Protocol-level regression tests for ``phantom_chessboard``.
+
+These tests deliberately avoid BLE and ROS. They pin the reverse-engineered
+wire-format invariants so later refactoring cannot silently change the physical
+board matrix, motor command syntax, or human move decoding.
+"""
+
 from phantom_chessboard.protocol import (
     STARTING_FEN,
     MoveEvent,
@@ -9,6 +16,7 @@ from phantom_chessboard.protocol import (
 
 
 def test_starting_matrix():
+    """Verify that standard FEN maps to the observed 10x10 file-major matrix."""
     matrix = (
         fen_to_phantom_matrix(
             STARTING_FEN
@@ -41,6 +49,7 @@ def test_starting_matrix():
 
 
 def test_new_game_packet():
+    """Verify opcode, matrix length and human-side suffix in a new-game packet."""
     packet = (
         encode_new_game_position(
             STARTING_FEN,
@@ -54,6 +63,7 @@ def test_new_game_packet():
 
 
 def test_motor_move():
+    """Verify directly observed normal-move and capture motor command encodings."""
     assert (
         encode_motor_move("d7-d5")
         == b"\x02M d7-d5 E"
@@ -66,6 +76,7 @@ def test_motor_move():
 
 
 def test_human_move_decode():
+    """Verify a physical move notification decodes into a typed ``MoveEvent``."""
     event = (
         decode_command_notification(
             b"\x03M 1 c3-e4"

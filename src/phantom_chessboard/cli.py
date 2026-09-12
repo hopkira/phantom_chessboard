@@ -1,4 +1,10 @@
-"""CLI for testing the Phantom library without ROS."""
+"""Command-line diagnostics for the standalone Phantom Chessboard driver.
+
+The CLI exercises exactly the same public ``PhantomBoard`` API used by ROS 2,
+which makes it useful for separating BLE/protocol failures from ROS integration
+problems. Long-running commands print decoded events concurrently so mismatch,
+status, move, and acknowledgement traffic remains visible.
+"""
 
 from __future__ import annotations
 
@@ -19,6 +25,11 @@ from .protocol import (
 async def print_events(
     board: PhantomBoard,
 ) -> None:
+    """Print decoded board events until the task is cancelled.
+    
+    Known event types get concise human-readable output; unknown protocol events
+    are still printed so new firmware behaviour remains observable.
+    """
     async for event in board.events():
         if isinstance(
             event,
@@ -58,6 +69,11 @@ async def print_events(
 
 
 async def run(args) -> None:
+    """Connect to Phantom and execute one parsed CLI subcommand.
+    
+    A background event-printer task runs for the lifetime of the connection and
+    is cancelled cleanly before disconnect.
+    """
     board = PhantomBoard(
         address=args.address or None,
     )
@@ -151,6 +167,7 @@ async def run(args) -> None:
 
 def build_parser(
 ) -> argparse.ArgumentParser:
+    """Create the command-line parser and all supported diagnostic subcommands."""
     parser = argparse.ArgumentParser(
         description=(
             "Phantom Chessboard "
@@ -240,6 +257,7 @@ def build_parser(
 
 
 def main() -> None:
+    """Console-script entry point installed as ``phantom-board``."""
     logging.basicConfig(
         level=logging.INFO,
         format=(
