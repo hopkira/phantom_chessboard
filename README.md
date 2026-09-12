@@ -1,6 +1,15 @@
-# Phantom Chessboard Python Bluetooth driver
+# Phantom Chessboard Python Bluetooth driver package
 
 A simple async Python BLE driver for the production Phantom Chessboard.
+
+## Installation
+
+Clone the github directory and then:
+
+```bash
+cd ~/phantom_chessboard
+python -m pip install -e .
+```
 
 ## Smoke test
 
