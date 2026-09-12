@@ -82,16 +82,14 @@ async for event in board.events():
     print(event)
 ```
 
-## Known production characteristics
+## Disclaimer
 
-- service: `fd31a840-22e7-11eb-adc1-0242ac120002`
-- mode: `c08d3691-e60f-4467-b2d0-4a4b7c72777e`
-- status: `acb6543c-92ca-11ee-b9d1-0242ac120002`
-- command/event: `cc68a66e-3bfa-4614-a77f-f46954a4c103`
+The phantom_chessboard software is an independent, unofficial project and is not affiliated with, endorsed by, supported by, or developed in conjunction with Phantom Chessboard or its creators. Phantom Chessboard has had no involvement in the development of this software and has provided no proprietary source code, documentation, technical assistance, intellectual property, or other confidential information for its development.
 
-## Capture caveat
+The software is provided for experimental, educational and interoperability purposes and is used entirely at your own risk. No warranty is given that it will operate correctly with any particular Phantom Chessboard, firmware version, computer, Bluetooth adapter, or software configuration. The author accepts no responsibility for any loss, damage, malfunction, data loss, or other consequence arising from its use, including damage to a computer, chessboard or other connected equipment, subject always to the terms and limitations of the Apache License, Version 2.0 and applicable law.
 
-The `09 31` preamble was directly captured before a computer-controlled
-capture while the human was White. `09 32` for human Black is inferred from
-Phantom's otherwise consistent 1/2 side encoding and has not yet been
-directly captured.
+No infringement of the copyright, patents, trademarks, trade secrets or other intellectual property rights of Phantom Chessboard, its designers, developers or other rights holders is intended. This project is not intended to reproduce, distribute or substitute for Phantom's firmware, applications or other proprietary software.
+
+All product names, trademarks and registered trademarks remain the property of their respective owners. References to Phantom Chessboard are made solely to identify the hardware with which this software is intended to interoperate.
+
+This notice is supplementary to, and does not alter or replace, the terms of the Apache License, Version 2.0 under which this software is distributed.
