@@ -13,7 +13,7 @@ phantom-board listen
 The default is discovery by Phantom service UUID, so the BLE address does
 not need to be hard-coded.
 
-## Start a game without ROS
+## Start a game
 
 ```bash
 phantom-board new-game --side white
