@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phantom-chessboard"
+version = "0.1.0"
+description = "Async Python BLE driver for the Phantom Chessboard production protocol"
+requires-python = ">=3.10"
+dependencies = [
+    "bleak>=0.22",
+]
+
+[project.scripts]
+phantom-board = "phantom_chessboard.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
