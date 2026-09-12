@@ -1,22 +1,10 @@
-# phantom-chessboard
+# Phantom Chessboard Python Bluetooth driver
 
-Standalone async Python BLE driver for the production Phantom Chessboard
-protocol captured from the Phantom mobile app.
-
-It has **no ROS dependency**. The K9 ROS 2 node in the accompanying bundle
-imports this package.
-
-## Install on the K9 Jetson
-
-```bash
-source ~/k9_venv/bin/activate
-cd ~/phantom_chessboard
-python -m pip install -e .
-```
+A simple async Python BLE driver for the production Phantom Chessboard.
 
 ## Smoke test
 
-Ensure the iPhone is disconnected from Phantom:
+Ensure the iPhone or Android is disconnected from Phantom:
 
 ```bash
 phantom-board listen
