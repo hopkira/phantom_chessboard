@@ -836,14 +836,19 @@ class PhantomBoard:
                 )
             )
 
-        version = (
-            self._status_version
-        )
-
+        # Do not snapshot the status version until the GATT write has
+        # completed.  Phantom can emit a residual "BLE Playing" notification
+        # from the preceding human-move acknowledgement immediately before the
+        # computer command.  Capturing the version before the write would allow
+        # that stale notification to satisfy this move's completion wait.
         await self._write_command(
             encode_motor_move(
                 notation
             )
+        )
+
+        version = (
+            self._status_version
         )
 
         if wait_for_completion:
