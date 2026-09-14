@@ -1,6 +1,6 @@
 # phantom-chessboard
 
-## Version 0.3.0
+## Version 0.3.1
 
 - Supports both `Managing Mismatch` and `Managing Mismatch...` as the same
   `MANAGING_MISMATCH` state.
@@ -9,6 +9,8 @@
 - Supports the five Phantom physical movement-speed profiles.
 - Motor-move completion is synchronized against status changes that occur after
   the corresponding GATT command write completes.
+- Adds `setup_position()` and `phantom-board setup-position` to reconcile the
+  physical board to a FEN and stop at `Waiting Side` without entering active play.
 
 Standalone asynchronous Python BLE interface for the Phantom Chessboard.
 
@@ -52,6 +54,25 @@ A movement speed can be selected when starting the game:
 phantom-board new-game --side white --speed fast
 ```
 
+## Set up a position without starting play
+
+To return the physical board to the standard starting position and stop at
+`Waiting Side`:
+
+```bash
+phantom-board setup-position
+```
+
+A different position can be supplied with FEN:
+
+```bash
+phantom-board setup-position \
+  --fen 'rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2'
+```
+
+The command reconciles the physical position and returns without selecting a
+player side or entering active play.
+
 ## Other commands
 
 ```bash
@@ -79,6 +100,11 @@ from phantom_chessboard import MovementSpeed, PhantomBoard
 board = PhantomBoard()
 
 await board.connect()
+
+# Reconcile the physical board to the standard starting position and stop
+# before player-side selection.
+await board.setup_position()
+
 await board.new_game(
     human_side="white",
     movement_speed=MovementSpeed.FAST,

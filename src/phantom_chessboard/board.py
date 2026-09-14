@@ -761,6 +761,56 @@ class PhantomBoard:
                     "retrying"
                 )
 
+    async def _reconcile_position(
+        self,
+        fen: str,
+        *,
+        timeout: float,
+    ) -> None:
+        """Reconcile the sensed physical position with a supplied FEN.
+
+        Completion is reached when the board reports ``Waiting Side``. The
+        method does not select a side or enter active play.
+        """
+        version = (
+            self._status_version
+        )
+
+        await self._write_command(
+            encode_reset_detection(
+                fen
+            )
+        )
+
+        await (
+            self._wait_for_status_after(
+                after_version=version,
+                accepted={
+                    "Waiting Side"
+                },
+                timeout=timeout,
+            )
+        )
+
+    async def setup_position(
+        self,
+        fen: str = STARTING_FEN,
+        *,
+        timeout: float = 300.0,
+    ) -> None:
+        """Set up a physical position and stop before active play begins.
+
+        The board enters setup mode, reconciles the sensed position with
+        ``fen``, and returns when ``Waiting Side`` is reached. No player side
+        is selected and no game is started.
+        """
+        await self.set_play_mode()
+
+        await self._reconcile_position(
+            fen,
+            timeout=timeout,
+        )
+
     async def new_game(
         self,
         *,
@@ -1000,24 +1050,9 @@ class PhantomBoard:
                 "supply human_side"
             )
 
-        version = (
-            self._status_version
-        )
-
-        await self._write_command(
-            encode_reset_detection(
-                fen
-            )
-        )
-
-        await (
-            self._wait_for_status_after(
-                after_version=version,
-                accepted={
-                    "Waiting Side"
-                },
-                timeout=timeout,
-            )
+        await self._reconcile_position(
+            fen,
+            timeout=timeout,
         )
 
         version = (

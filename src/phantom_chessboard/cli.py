@@ -149,6 +149,18 @@ async def run(args) -> None:
                 "Recalibration complete"
             )
 
+        elif (
+            args.command
+            == "setup-position"
+        ):
+            await board.setup_position(
+                args.fen
+            )
+            print(
+                "Position ready; "
+                "waiting for side selection"
+            )
+
         elif args.command == "reset":
             await (
                 board.reset_detection(
@@ -288,6 +300,19 @@ def build_parser(
     sub.add_parser("snap")
     sub.add_parser(
         "recalibrate"
+    )
+
+    setup_position = sub.add_parser(
+        "setup-position"
+    )
+    setup_position.add_argument(
+        "--fen",
+        default=STARTING_FEN,
+        help=(
+            "Position to reconcile. "
+            "Defaults to the standard "
+            "starting position."
+        ),
     )
 
     reset = sub.add_parser(
