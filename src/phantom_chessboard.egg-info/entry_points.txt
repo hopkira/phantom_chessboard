@@ -1,0 +1,2 @@
+[console_scripts]
+phantom-board = phantom_chessboard.cli:main

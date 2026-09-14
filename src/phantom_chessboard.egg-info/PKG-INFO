@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: phantom-chessboard
+Version: 0.3.0
+Summary: Asynchronous Python BLE interface for the Phantom Chessboard
+Requires-Python: >=3.10
+License-File: LICENSE
+Requires-Dist: bleak>=0.22
+Dynamic: license-file
