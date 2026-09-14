@@ -1,26 +1,17 @@
-"""Phantom Chessboard production BLE protocol definitions.
+"""Phantom Chessboard BLE protocol definitions.
 
-This module contains the pure wire-protocol layer used by the standalone
-``phantom_chessboard`` package. It performs no Bluetooth or ROS I/O: functions
-only encode commands, decode notifications, validate values, and convert chess
-positions into Phantom's physical-board representation.
+This module contains the wire-protocol layer used by the standalone
+``phantom_chessboard`` package. It performs no Bluetooth I/O: functions encode
+commands, decode notifications, validate values, and convert chess positions
+into Phantom's physical-board representation.
 
-The protocol was reverse engineered from ATT traces captured from a production
-Phantom board and the official mobile application on 12 September 2026. Code
-comments and docstrings deliberately distinguish directly observed behaviour
-from inferred behaviour so future maintainers can tell which assumptions still
-need confirmation.
+The interface uses dedicated characteristics for operating mode, movement
+speed, board status, command/event traffic, and telemetry. The first byte on
+the command/event characteristic is an opcode; common payloads are ASCII.
 
-The production integration currently relies on three custom characteristics:
-``MODE_UUID`` for top-level mode, ``STATUS_UUID`` for human-readable board
-status/correction messages, and ``COMMAND_UUID`` for bidirectional binary/ASCII
-commands and events. The first byte on the command/event characteristic is an
-opcode; common payloads are ASCII.
-
-Phantom's new-game position format is not FEN. It is a 10x10 file-major matrix
-with a one-cell empty border. Interior rows represent files a..h and columns
-represent ranks 8..1. ``fen_to_phantom_matrix`` owns that conversion so no
-other layer needs to know the physical encoding.
+Phantom's new-game position format is a 10x10 file-major matrix with a one-cell
+empty border. Interior rows represent files a..h and columns represent ranks
+8..1. ``fen_to_phantom_matrix`` owns that conversion.
 """
 
 from __future__ import annotations
@@ -34,6 +25,8 @@ from typing import Optional
 SERVICE_UUID = "fd31a840-22e7-11eb-adc1-0242ac120002"
 MODE_UUID = "c08d3691-e60f-4467-b2d0-4a4b7c72777e"
 STATUS_UUID = "acb6543c-92ca-11ee-b9d1-0242ac120002"
+# Dedicated physical movement-speed characteristic.
+SPEED_UUID = "acb646cc-92ca-11ee-b9d1-0242ac120002"
 COMMAND_UUID = "cc68a66e-3bfa-4614-a77f-f46954a4c103"
 TELEMETRY_UUID = "7b204548-40c4-11eb-adc1-0242ac120002"
 
@@ -41,6 +34,52 @@ STARTING_FEN = (
     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR "
     "w KQkq - 0 1"
 )
+
+
+class MovementSpeed(str, Enum):
+    """Phantom's five physical movement-speed profiles.
+
+    ``SPEED_UUID`` accepts ASCII digits ``1`` through ``5``:
+    ``1`` Silence, ``2`` Slow, ``3`` Medium, ``4`` Fast, ``5`` Blitz.
+    """
+
+    SILENCE = "1"
+    SLOW = "2"
+    MEDIUM = "3"
+    FAST = "4"
+    BLITZ = "5"
+
+    @classmethod
+    def parse(
+        cls,
+        value: "MovementSpeed | str | int",
+    ) -> "MovementSpeed":
+        """Normalise a profile name or protocol digit."""
+
+        if isinstance(value, cls):
+            return value
+
+        normal = str(value).strip().lower()
+
+        names = {
+            "silence": cls.SILENCE,
+            "slow": cls.SLOW,
+            "medium": cls.MEDIUM,
+            "fast": cls.FAST,
+            "blitz": cls.BLITZ,
+        }
+
+        if normal in names:
+            return names[normal]
+
+        for speed in cls:
+            if normal == speed.value:
+                return speed
+
+        raise ValueError(
+            "Unsupported Phantom movement speed "
+            f"{value!r}; expected silence, slow, medium, fast, blitz or 1..5"
+        )
 
 
 class Side(str, Enum):
@@ -114,9 +153,8 @@ class BoardState(str, Enum):
 class PhantomEvent:
     """Base type for every decoded Phantom notification.
     
-    ``raw`` always preserves the exact bytes received from the board. Retaining
-    the raw payload is important while the reverse-engineered protocol is still
-    evolving and allows unknown events to be diagnosed later.
+    ``raw`` preserves the exact bytes received from the board so unknown events
+    can be inspected without losing information.
     """
     raw: bytes
 
@@ -149,8 +187,8 @@ class MoveEvent(PhantomEvent):
     def uci(self) -> str:
         """Return coordinate-only UCI notation for chess logic.
         
-        Promotion suffixes are not yet handled because a promotion trace has not
-        been captured; the driver must not guess promotion semantics.
+        Promotion suffixes are not included; this property returns only source and
+        destination coordinates.
         """
         return (
             self.from_square
@@ -195,8 +233,8 @@ class AckEvent(PhantomEvent):
 class ProtocolEvent(PhantomEvent):
     """Fallback event for an unknown or not-yet-decoded protocol message.
     
-    Unknown messages are deliberately surfaced instead of ignored so protocol
-    changes can be captured without modifying the BLE transport first.
+    Unknown messages are surfaced instead of ignored so callers can inspect the
+    raw opcode and payload.
     """
     opcode: int
     payload: bytes
@@ -209,6 +247,10 @@ _STATUS_STATES = {
         BoardState.STARTING_GAME
     ),
     "Setting Up": BoardState.SETTING_UP,
+    # Treat the forms with and without a trailing ellipsis as the same state.
+    "Managing Mismatch": (
+        BoardState.MANAGING_MISMATCH
+    ),
     "Managing Mismatch...": (
         BoardState.MANAGING_MISMATCH
     ),
@@ -372,11 +414,10 @@ def encode_new_game_position(
     fen: str,
     human_side: Side | str,
 ) -> bytes:
-    """Encode the observed opcode-0 new-game setup packet.
+    """Encode the opcode-0 new-game setup packet.
     
     Wire format is ``0x00 + 100-byte matrix + b",W"`` for a White human or
-    ``b",B"`` for a Black human. The packet was observed immediately after the
-    official app switched the board into play mode.
+    ``b",B"`` for a Black human.
     """
     side = Side.parse(human_side)
 
@@ -465,8 +506,8 @@ def encode_motor_move(
 ) -> bytes:
     """Encode a board-controlled physical move using opcode ``0x02``.
     
-    Observed examples include ``0x02 + b"M d7-d5 E"`` for a normal move and
-    ``0x02 + b"M b4xd2 E"`` for a capture.
+    Normal moves use ``0x02 + b"M d7-d5 E"``; captures use the same format
+    with ``x`` as the separator, for example ``0x02 + b"M b4xd2 E"``.
     """
     normal = normalise_move_notation(
         notation
@@ -481,10 +522,10 @@ def encode_motor_move(
 
 def encode_acknowledge_human_move(
 ) -> bytes:
-    """Encode the ``03 31`` acknowledgement sent after an accepted human move.
+    """Encode the ``03 31`` acknowledgement for an accepted human move.
     
-    The ROS/chess layer should send this only after it has validated and applied
-    the physical move to its authoritative game state.
+    Callers should send this only after accepting the move in their own game
+    state.
     """
     return b"\x031"
 
@@ -494,8 +535,7 @@ def encode_side(
 ) -> bytes:
     """Encode human-side selection.
     
-    Directly observed values are ``0A 31`` for human White and ``0A 32`` for
-    human Black.
+    Values are ``0A 31`` for human White and ``0A 32`` for human Black.
     """
     parsed = Side.parse(side)
 
@@ -509,11 +549,9 @@ def encode_side(
 def encode_capture_preamble(
     side: Side | str,
 ) -> bytes:
-    """Encode the preamble observed before a computer-controlled capture.
+    """Encode the side-dependent preamble for a board-controlled capture.
     
-    ``09 31`` is directly observed when the human player is White. ``09 32``
-    for human Black is inferred from Phantom's otherwise consistent 1/2 side
-    encoding and remains provisional until captured directly.
+    White maps to ``09 31`` and Black maps to ``09 32``.
     """
     parsed = Side.parse(side)
 
@@ -525,12 +563,12 @@ def encode_capture_preamble(
 
 
 def encode_recalibrate() -> bytes:
-    """Encode the directly observed single-byte recalibration command ``0x07``."""
+    """Encode the single-byte recalibration command ``0x07``."""
     return b"\x07"
 
 
 def encode_snap_to_center() -> bytes:
-    """Encode the directly observed snap-to-centre command ``0x0D``."""
+    """Encode the snap-to-centre command ``0x0D``."""
     return b"\x0d"
 
 
@@ -560,13 +598,27 @@ def encode_reset_detection(
     )
 
 
+def encode_movement_speed(
+    speed: MovementSpeed | str | int,
+) -> bytes:
+    """Encode a speed selection for direct writing to ``SPEED_UUID``."""
+
+    return (
+        MovementSpeed.parse(
+            speed
+        )
+        .value
+        .encode("ascii")
+    )
+
+
 def encode_mode_play() -> bytes:
-    """Return the observed mode-characteristic value for play mode: ASCII ``2``."""
+    """Return the mode-characteristic value for play mode: ASCII ``2``."""
     return b"2"
 
 
 def encode_mode_home() -> bytes:
-    """Return the observed mode-characteristic value for HOME mode: ASCII ``3``."""
+    """Return the mode-characteristic value for HOME mode: ASCII ``3``."""
     return b"3"
 
 

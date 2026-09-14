@@ -1,22 +1,25 @@
 """Protocol-level regression tests for ``phantom_chessboard``.
 
-These tests deliberately avoid BLE and ROS. They pin the reverse-engineered
-wire-format invariants so later refactoring cannot silently change the physical
-board matrix, motor command syntax, or human move decoding.
+The tests pin wire-format invariants so refactoring cannot silently change the
+board matrix, motor command syntax, status mapping, or move decoding.
 """
 
 from phantom_chessboard.protocol import (
     STARTING_FEN,
+    BoardState,
+    MovementSpeed,
     MoveEvent,
     decode_command_notification,
+    decode_status_notification,
     encode_motor_move,
+    encode_movement_speed,
     encode_new_game_position,
     fen_to_phantom_matrix,
 )
 
 
 def test_starting_matrix():
-    """Verify that standard FEN maps to the observed 10x10 file-major matrix."""
+    """Verify that standard FEN maps to the 10x10 file-major matrix."""
     matrix = (
         fen_to_phantom_matrix(
             STARTING_FEN
@@ -63,7 +66,7 @@ def test_new_game_packet():
 
 
 def test_motor_move():
-    """Verify directly observed normal-move and capture motor command encodings."""
+    """Verify normal-move and capture motor command encodings."""
     assert (
         encode_motor_move("d7-d5")
         == b"\x02M d7-d5 E"
@@ -89,3 +92,26 @@ def test_human_move_decode():
     )
     assert event.uci == "c3e4"
     assert not event.is_capture
+
+
+def test_mismatch_status_variants() -> None:
+    """Both supported mismatch strings map to the same logical state."""
+    without_ellipsis = decode_status_notification(
+        b"Managing Mismatch"
+    )
+    with_ellipsis = decode_status_notification(
+        b"Managing Mismatch..."
+    )
+
+    assert without_ellipsis.state is BoardState.MANAGING_MISMATCH
+    assert with_ellipsis.state is BoardState.MANAGING_MISMATCH
+
+
+def test_movement_speed_encoding():
+    """Verify the five movement-speed encodings."""
+    assert encode_movement_speed("silence") == b"1"
+    assert encode_movement_speed("slow") == b"2"
+    assert encode_movement_speed("medium") == b"3"
+    assert encode_movement_speed("fast") == b"4"
+    assert encode_movement_speed("blitz") == b"5"
+    assert MovementSpeed.parse(4) is MovementSpeed.FAST

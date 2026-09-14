@@ -1,21 +1,19 @@
-"""Asynchronous, ROS-independent driver for the Phantom Chessboard.
+"""Asynchronous driver for the Phantom Chessboard.
 
 ``PhantomBoard`` owns BLE discovery, connection lifecycle, GATT notification
-subscriptions, protocol command writes, event delivery, and waiting for
-asynchronous mechanical state transitions. It intentionally does not implement
-chess rules: legality, game state, Stockfish/Lichess, promotions, and strategy
-belong to a higher-level consumer such as K9's ``chess_manager``.
+subscriptions, protocol command writes, event delivery, and asynchronous
+mechanical-state waits. Chess rules, legality, game state, and strategy are
+left to the calling application.
 
 Concurrency model
 -----------------
 The class is intended to live in one asyncio event loop. Bleak callbacks decode
 notifications and update lightweight state immediately; decoded events are then
-placed on an ``asyncio.Queue`` for ordinary application code. Long operations
-wait on board-originated status/ack events rather than arbitrary fixed sleeps.
+placed on an ``asyncio.Queue`` for application code. Long operations wait on
+board-originated status and acknowledgement events rather than fixed sleeps.
 
-The iPhone/official application should be disconnected before this driver tries
-to connect. In observed use the Phantom board behaves as a single-central BLE
-peripheral.
+Ensure that no other BLE client is connected to the board before calling
+``connect()``.
 """
 
 from __future__ import annotations
@@ -38,12 +36,14 @@ from .protocol import (
     COMMAND_UUID,
     MODE_UUID,
     SERVICE_UUID,
+    SPEED_UUID,
     STATUS_UUID,
     STARTING_FEN,
     AckEvent,
     BoardState,
     CleanEvent,
     CorrectionEvent,
+    MovementSpeed,
     PhantomEvent,
     Side,
     StatusEvent,
@@ -54,6 +54,7 @@ from .protocol import (
     encode_mode_home,
     encode_mode_play,
     encode_motor_move,
+    encode_movement_speed,
     encode_new_game_position,
     encode_recalibrate,
     encode_reset_detection,
@@ -150,6 +151,10 @@ class PhantomBoard:
             Side
         ] = None
 
+        self._movement_speed: Optional[
+            MovementSpeed
+        ] = None
+
     @property
     def connected(self) -> bool:
         """Return ``True`` while the underlying Bleak client reports a live connection."""
@@ -174,6 +179,13 @@ class PhantomBoard:
     ) -> Optional[Side]:
         """Return the human side currently known to the driver, if one has been selected."""
         return self._human_side
+
+    @property
+    def movement_speed(
+        self,
+    ) -> Optional[MovementSpeed]:
+        """Return the most recently selected physical movement-speed profile."""
+        return self._movement_speed
 
     def add_event_handler(
         self,
@@ -547,7 +559,7 @@ class PhantomBoard:
         Raises
         ------
         TimeoutError
-            If no accepted status is observed before the timeout.
+            If no accepted status is received before the timeout.
         """
         loop = (
             asyncio.get_running_loop()
@@ -637,10 +649,40 @@ class PhantomBoard:
                 timeout=remaining,
             )
 
+    async def set_movement_speed(
+        self,
+        speed: MovementSpeed | str | int,
+    ) -> None:
+        """Select Phantom's physical movement-speed profile.
+
+        Wire mapping: ``1`` Silence, ``2`` Slow, ``3`` Medium, ``4`` Fast and
+        ``5`` Blitz. The setting can be changed during play.
+        """
+
+        parsed = MovementSpeed.parse(
+            speed
+        )
+        client = self._require_client()
+
+        await client.write_gatt_char(
+            SPEED_UUID,
+            encode_movement_speed(
+                parsed
+            ),
+            response=True,
+        )
+
+        self._movement_speed = parsed
+
+        self.log.info(
+            "Phantom movement speed set to %s",
+            parsed.name,
+        )
+
     async def set_play_mode(
         self,
     ) -> None:
-        """Switch the dedicated mode characteristic to the observed play value ``2``."""
+        """Switch the dedicated mode characteristic to play value ``2``."""
         await self._write_mode(
             encode_mode_play()
         )
@@ -677,8 +719,8 @@ class PhantomBoard:
     ) -> None:
         """Tell Phantom which colour is controlled by the human player.
         
-        By default the method waits for the observed ``06 04`` acknowledgement and
-        retries once. The selected side is retained for reset/capture operations.
+        By default the method waits for acknowledgement code ``06 04`` and retries
+        once. The selected side is retained for reset and capture operations.
         """
         parsed = Side.parse(side)
         self._human_side = parsed
@@ -724,14 +766,17 @@ class PhantomBoard:
         *,
         fen: str = STARTING_FEN,
         human_side: Side | str,
+        movement_speed: MovementSpeed | str | int | None = None,
         setup_timeout: float = 300.0,
     ) -> None:
         """Initialise and reconcile a physical game position.
         
         Sequence: enter play mode, send opcode-0 position matrix, allow Phantom's
         own mismatch-management process to reconcile pieces, wait for ``Waiting
-        Side``, select the human side, then wait for ``Board Playing``. Correction
-        events remain available concurrently through ``events()``.
+        Side``, optionally select movement speed, select the human side, then
+        wait for ``Board Playing``. Applying speed while Phantom is still
+        waiting for side selection guarantees the profile is active before play
+        can begin. Correction events remain available through ``events()``.
         """
         parsed = Side.parse(
             human_side
@@ -760,6 +805,11 @@ class PhantomBoard:
                 timeout=setup_timeout,
             )
         )
+
+        if movement_speed is not None:
+            await self.set_movement_speed(
+                movement_speed
+            )
 
         version = (
             self._status_version
@@ -800,10 +850,10 @@ class PhantomBoard:
         timeout: float = 120.0,
         send_capture_preamble: bool = True,
     ) -> None:
-        """Command a computer/K9-controlled physical board move.
+        """Command a board-controlled physical move.
         
         Normal moves use ``-`` and captures use ``x``. Captures optionally send the
-        observed opcode-09 preamble first. The method can wait for a subsequent
+        opcode-09 preamble first. The method can wait for a subsequent
         playing status so mechanical execution remains asynchronous and event
         driven.
         
@@ -836,11 +886,9 @@ class PhantomBoard:
                 )
             )
 
-        # Do not snapshot the status version until the GATT write has
-        # completed.  Phantom can emit a residual "BLE Playing" notification
-        # from the preceding human-move acknowledgement immediately before the
-        # computer command.  Capturing the version before the write would allow
-        # that stale notification to satisfy this move's completion wait.
+        # Snapshot the status version only after the GATT write completes.
+        # This ensures that status notifications received before the current
+        # motor command cannot satisfy its completion wait.
         await self._write_command(
             encode_motor_move(
                 notation
@@ -872,9 +920,8 @@ class PhantomBoard:
     ) -> None:
         """Ask Phantom to centre pieces and wait until play resumes.
         
-        The captured operation can take around 100 seconds, so the timeout is
-        intentionally generous and completion is status-driven rather than a fixed
-        sleep.
+        The operation can take around 100 seconds, so the timeout is intentionally
+        generous and completion is status-driven rather than a fixed sleep.
         """
         version = (
             self._status_version
@@ -900,7 +947,7 @@ class PhantomBoard:
         *,
         timeout: float = 90.0,
     ) -> None:
-        """Run the observed recalibration/homing operation and wait until play resumes."""
+        """Run recalibration/homing and wait until play resumes."""
         version = (
             self._status_version
         )

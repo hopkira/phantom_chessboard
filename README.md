@@ -1,26 +1,35 @@
-# Phantom Chessboard Python Bluetooth driver package
+# phantom-chessboard
 
-A simple async Python BLE driver for the production Phantom Chessboard.
+## Version 0.3.0
+
+- Supports both `Managing Mismatch` and `Managing Mismatch...` as the same
+  `MANAGING_MISMATCH` state.
+- The diagnostic CLI drains already-queued final events before disconnecting so
+  completing status notifications remain visible after commands such as `reset`.
+- Supports the five Phantom physical movement-speed profiles.
+- Motor-move completion is synchronized against status changes that occur after
+  the corresponding GATT command write completes.
+
+Standalone asynchronous Python BLE interface for the Phantom Chessboard.
 
 ## Installation
 
-Clone the github directory and then:
-
 ```bash
-cd ~/phantom_chessboard
+python3 -m venv .venv
+source .venv/bin/activate
 python -m pip install -e .
 ```
 
 ## Smoke test
 
-Ensure the iPhone or Android is disconnected from Phantom:
+Ensure no other BLE client is connected to the board, then run:
 
 ```bash
 phantom-board listen
 ```
 
-The default is discovery by Phantom service UUID, so the BLE address does
-not need to be hard-coded.
+The default is discovery by Phantom service UUID, so the BLE address does not
+need to be hard-coded.
 
 ## Start a game
 
@@ -34,14 +43,21 @@ or:
 phantom-board new-game --side black
 ```
 
-The library waits through Phantom's own mismatch management. Status and
-correction events are still available concurrently through `events()`.
+The library waits through Phantom's mismatch-management sequence. Status and
+correction events remain available concurrently through `events()`.
 
-## Other tests
+A movement speed can be selected when starting the game:
+
+```bash
+phantom-board new-game --side white --speed fast
+```
+
+## Other commands
 
 ```bash
 phantom-board move e7-e5
 phantom-board move f6xe4
+phantom-board speed medium
 phantom-board snap
 phantom-board recalibrate
 phantom-board home
@@ -58,16 +74,20 @@ phantom-board reset \
 ## Python API
 
 ```python
-from phantom_chessboard import PhantomBoard
+from phantom_chessboard import MovementSpeed, PhantomBoard
 
 board = PhantomBoard()
 
 await board.connect()
-await board.new_game(human_side="white")
+await board.new_game(
+    human_side="white",
+    movement_speed=MovementSpeed.FAST,
+)
 await board.acknowledge_human_move()
 await board.set_side("white")
 await board.make_move("d7-d5")
 await board.make_move("f6xe4")
+await board.set_movement_speed(MovementSpeed.MEDIUM)
 await board.reset_detection(fen)
 await board.snap_to_center()
 await board.recalibrate()
@@ -82,14 +102,46 @@ async for event in board.events():
     print(event)
 ```
 
-## Disclaimer
+## GATT characteristics
 
-The phantom_chessboard software is an independent, unofficial project and is not affiliated with, endorsed by, supported by, or developed in conjunction with Phantom Chessboard or its creators. Phantom Chessboard has had no involvement in the development of this software and has provided no proprietary source code, documentation, technical assistance, intellectual property, or other confidential information for its development.
+- service: `fd31a840-22e7-11eb-adc1-0242ac120002`
+- mode: `c08d3691-e60f-4467-b2d0-4a4b7c72777e`
+- speed: `acb646cc-92ca-11ee-b9d1-0242ac120002`
+- status: `acb6543c-92ca-11ee-b9d1-0242ac120002`
+- command/event: `cc68a66e-3bfa-4614-a77f-f46954a4c103`
+- telemetry: `7b204548-40c4-11eb-adc1-0242ac120002`
 
-The software is provided for experimental, educational and interoperability purposes and is used entirely at your own risk. No warranty is given that it will operate correctly with any particular Phantom Chessboard, firmware version, computer, Bluetooth adapter, or software configuration. The author accepts no responsibility for any loss, damage, malfunction, data loss, or other consequence arising from its use, including damage to a computer, chessboard or other connected equipment, subject always to the terms and limitations of the Apache License, Version 2.0 and applicable law.
+## Physical movement speed
 
-No infringement of the copyright, patents, trademarks, trade secrets or other intellectual property rights of Phantom Chessboard, its designers, developers or other rights holders is intended. This project is not intended to reproduce, distribute or substitute for Phantom's firmware, applications or other proprietary software.
+The speed characteristic accepts one ASCII digit:
 
-All product names, trademarks and registered trademarks remain the property of their respective owners. References to Phantom Chessboard are made solely to identify the hardware with which this software is intended to interoperate.
+- `1` Silence
+- `2` Slow
+- `3` Medium
+- `4` Fast
+- `5` Blitz
 
-This notice is supplementary to, and does not alter or replace, the terms of the Apache License, Version 2.0 under which this software is distributed.
+```python
+from phantom_chessboard import MovementSpeed
+
+await board.set_movement_speed(MovementSpeed.FAST)
+```
+
+The setting can be changed during an active game.
+
+## Capture moves
+
+For board-controlled captures, `PhantomBoard.make_move()` sends a side-dependent
+capture preamble before the motor command when `send_capture_preamble=True`.
+The mapping is:
+
+- human White: `09 31`
+- human Black: `09 32`
+
+Normal moves do not send this preamble.
+
+## Move-completion synchronization
+
+`PhantomBoard.make_move()` records the status version after the motor-command
+GATT write returns. Only later `Board Playing` or `BLE Playing` notifications
+can complete that move.

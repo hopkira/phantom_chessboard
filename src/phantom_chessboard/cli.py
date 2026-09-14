@@ -1,9 +1,8 @@
-"""Command-line diagnostics for the standalone Phantom Chessboard driver.
+"""Command-line diagnostics for the Phantom Chessboard driver.
 
-The CLI exercises exactly the same public ``PhantomBoard`` API used by ROS 2,
-which makes it useful for separating BLE/protocol failures from ROS integration
-problems. Long-running commands print decoded events concurrently so mismatch,
-status, move, and acknowledgement traffic remains visible.
+The CLI exercises the public ``PhantomBoard`` API and prints decoded events so
+connection, protocol, status, move, and acknowledgement behaviour can be
+inspected from the command line.
 """
 
 from __future__ import annotations
@@ -96,6 +95,10 @@ async def run(args) -> None:
             await board.new_game(
                 fen=args.fen,
                 human_side=args.side,
+                movement_speed=(
+                    args.speed
+                    or None
+                ),
             )
             print("Board Playing")
             await asyncio.Event().wait()
@@ -105,6 +108,15 @@ async def run(args) -> None:
                 args.move
             )
             print("Move completed")
+
+        elif args.command == "speed":
+            await board.set_movement_speed(
+                args.speed
+            )
+            print(
+                "Movement speed set to "
+                f"{args.speed}"
+            )
 
         elif args.command == "ack":
             await (
@@ -155,6 +167,15 @@ async def run(args) -> None:
             print("Board HOME")
 
     finally:
+        # A high-level operation can complete on the same notification that
+        # also placed its final status event on the diagnostic queue.  Give
+        # the background printer a brief opportunity to consume that already
+        # queued event before cancelling it; otherwise commands such as
+        # ``reset`` can report completion without visibly printing the final
+        # ``Board Playing`` status.  This delay is diagnostic-only and has no
+        # effect on board/protocol completion semantics.
+        await asyncio.sleep(0.10)
+
         printer.cancel()
 
         with contextlib.suppress(
@@ -206,6 +227,40 @@ def build_parser(
     new_game.add_argument(
         "--fen",
         default=STARTING_FEN,
+    )
+    new_game.add_argument(
+        "--speed",
+        choices=[
+            "silence",
+            "slow",
+            "medium",
+            "fast",
+            "blitz",
+        ],
+        default="",
+        help=(
+            "Optional physical movement speed "
+            "to apply before play begins."
+        ),
+    )
+
+    speed = sub.add_parser(
+        "speed"
+    )
+    speed.add_argument(
+        "speed",
+        choices=[
+            "silence",
+            "slow",
+            "medium",
+            "fast",
+            "blitz",
+            "1",
+            "2",
+            "3",
+            "4",
+            "5",
+        ],
     )
 
     move = sub.add_parser(
